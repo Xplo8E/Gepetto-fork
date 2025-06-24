@@ -134,22 +134,60 @@ class RenameHandler(idaapi.action_handler_t):
     """
     This handler requests new variable names from the model and updates the
     decompiler's output.
+    It now uses a two-step process:
+    1. Ask the model for an explanation of the function.
+    2. Use that explanation as context to ask for better variable names.
     """
 
     def __init__(self):
         idaapi.action_handler_t.__init__(self)
 
-    def activate(self, ctx):
-        decompiler_output = ida_hexrays.decompile(idaapi.get_screen_ea())
-        v = ida_hexrays.get_widget_vdui(ctx.widget)
+    def _explanation_callback(self, address, view, decompiler_output, response):
+        """
+        This callback receives the explanation and triggers the second request for renaming.
+        """
+        print(_("Step 1/2: Function explanation received. Now asking for variable names..."))
+
+        # Create the second prompt, now with the explanation as context.
+        rename_prompt = (
+            "An expert reverse engineer has provided the following explanation for a C function:\n"
+            "--- EXPLANATION ---\n"
+            f"{response}\n"
+            "--- END EXPLANATION ---\n\n"
+            "Based on that explanation, analyze the original C function below and suggest better variable names. "
+            "Reply with a JSON dictionary where keys are the original names and values are the proposed names. "
+            "Do not explain anything, only print the JSON dictionary."
+            "\n\n"
+            "--- C FUNCTION ---\n"
+            f"{decompiler_output}"
+        )
+
+        # Step 2: Call the model again, but this time for the renames.
         gepetto.config.model.query_model_async(
-            _("Analyze the following C function:\n{decompiler_output}"
-              "\nSuggest better variable names, reply with a JSON array where keys are the original"
-              " names and values are the proposed names. Do not explain anything, only print the "
-              "JSON dictionary.").format(decompiler_output=str(decompiler_output)),
-            functools.partial(rename_callback, address=idaapi.get_screen_ea(), view=v),
-            additional_model_options={"response_format": {"type": "json_object"}})
-        print(_("Request to {model} sent...").format(model=str(gepetto.config.model)))
+            rename_prompt,
+            functools.partial(rename_callback, address=address, view=view),
+            additional_model_options={"response_format": {"type": "json_object"}}
+        )
+
+    def activate(self, ctx):
+        decompiler_output = str(ida_hexrays.decompile(idaapi.get_screen_ea()))
+        v = ida_hexrays.get_widget_vdui(ctx.widget)
+        address = idaapi.get_screen_ea()
+
+        print(_("Step 1/2: Asking for an explanation of the function to improve context..."))
+
+        # Step 1: Ask for an explanation of the function first.
+        explain_prompt = (
+            "Can you explain what the following C function does in a concise paragraph? "
+            "Provide only the explanation, without any introduction."
+            f"\n\n{decompiler_output}"
+        )
+        
+        gepetto.config.model.query_model_async(
+            explain_prompt,
+            functools.partial(self._explanation_callback, address=address, view=v, decompiler_output=decompiler_output)
+        )
+        
         return 1
 
     # This action is always available.
